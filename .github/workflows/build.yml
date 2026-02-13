@@ -1,0 +1,344 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: 
+      - master
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Build Cross ${{ matrix.target }} (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - i686-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+          - arm-unknown-linux-musleabi
+          - aarch64-linux-android
+          - arm-linux-androideabi
+        features: [default, tls]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rust-src
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ matrix.features }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-${{ matrix.features }}-target-
+
+      - name: Cache cross
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cross
+          key: ${{ runner.os }}-cross-bin
+
+      - name: Install cross
+        run: |
+          if [ ! -f ~/.cargo/bin/cross ]; then
+            cargo install cross --git https://github.com/cross-rs/cross
+          fi
+          cross --version
+
+      - name: Build (default features)
+        if: matrix.features == 'default'
+        env:
+          CROSS_NO_WARNINGS: 0
+        run: |
+          cross build --release --target ${{ matrix.target }}
+
+      - name: Build (tls feature)
+        if: matrix.features == 'tls'
+        env:
+          CROSS_NO_WARNINGS: 0
+        run: |
+          cross build --release --target ${{ matrix.target }} --features tls
+
+      - name: Install UPX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx-ucl
+
+      - name: Compress with UPX
+        continue-on-error: true
+        run: |
+          BINARY_PATH="target/${{ matrix.target }}/release/srun"
+
+          if [ -f "${BINARY_PATH}" ]; then
+            echo "Original size: $(ls -lh ${BINARY_PATH} | awk '{print $5}')"
+            upx --best --lzma "${BINARY_PATH}" || echo "UPX compression failed, continuing with uncompressed binary"
+            echo "Compressed size: $(ls -lh ${BINARY_PATH} | awk '{print $5}')"
+          else
+            echo "Binary not found at ${BINARY_PATH}"
+            ls -la target/${{ matrix.target }}/release/ || true
+            exit 1
+          fi
+
+      - name: Prepare artifact
+        run: |
+          BINARY_PATH="target/${{ matrix.target }}/release/srun"
+          ARTIFACT_NAME="srun-${{ matrix.target }}-${{ matrix.features }}"
+
+          mkdir -p artifacts
+          cp "${BINARY_PATH}" "artifacts/${ARTIFACT_NAME}"
+          ls -lh "artifacts/${ARTIFACT_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: srun-${{ matrix.target }}-${{ matrix.features }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+  build-macos:
+    name: Build macOS ${{ matrix.target }} (${{ matrix.features }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+        features: [default, tls]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ matrix.features }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-${{ matrix.features }}-target-
+
+      - name: Build (default features)
+        if: matrix.features == 'default'
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (tls feature)
+        if: matrix.features == 'tls'
+        run: |
+          cargo build --release --target ${{ matrix.target }} --features tls
+
+      - name: Install UPX
+        run: |
+          brew install upx
+
+      - name: Compress with UPX
+        continue-on-error: true
+        run: |
+          BINARY_PATH="target/${{ matrix.target }}/release/srun"
+
+          if [ -f "${BINARY_PATH}" ]; then
+            echo "Original size: $(ls -lh ${BINARY_PATH} | awk '{print $5}')"
+            upx --best --lzma "${BINARY_PATH}" || echo "UPX compression failed, continuing with uncompressed binary"
+            echo "Compressed size: $(ls -lh ${BINARY_PATH} | awk '{print $5}')"
+          else
+            echo "Binary not found at ${BINARY_PATH}"
+            ls -la target/${{ matrix.target }}/release/ || true
+            exit 1
+          fi
+
+      - name: Prepare artifact
+        run: |
+          BINARY_PATH="target/${{ matrix.target }}/release/srun"
+          ARTIFACT_NAME="srun-${{ matrix.target }}-${{ matrix.features }}"
+
+          mkdir -p artifacts
+          cp "${BINARY_PATH}" "artifacts/${ARTIFACT_NAME}"
+          ls -lh "artifacts/${ARTIFACT_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: srun-${{ matrix.target }}-${{ matrix.features }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+  build-windows:
+    name: Build Windows ${{ matrix.target }} (${{ matrix.features }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - i686-pc-windows-msvc
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+        features: [default, tls]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ matrix.features }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-${{ matrix.features }}-target-
+
+      - name: Build (default features)
+        if: matrix.features == 'default'
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (tls feature)
+        if: matrix.features == 'tls'
+        run: |
+          cargo build --release --target ${{ matrix.target }} --features tls
+
+      - name: Install UPX
+        run: |
+          choco install upx
+
+      - name: Compress with UPX
+        continue-on-error: true
+        shell: bash
+        run: |
+          BINARY_PATH="target/${{ matrix.target }}/release/srun.exe"
+
+          if [ -f "${BINARY_PATH}" ]; then
+            echo "Original size: $(ls -lh ${BINARY_PATH} | awk '{print $5}')"
+            upx --best --lzma "${BINARY_PATH}" || echo "UPX compression failed, continuing with uncompressed binary"
+            echo "Compressed size: $(ls -lh ${BINARY_PATH} | awk '{print $5}')"
+          else
+            echo "Binary not found at ${BINARY_PATH}"
+            ls -la target/${{ matrix.target }}/release/ || true
+            exit 1
+          fi
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          BINARY_PATH="target/${{ matrix.target }}/release/srun.exe"
+          ARTIFACT_NAME="srun-${{ matrix.target }}-${{ matrix.features }}.exe"
+
+          mkdir -p artifacts
+          cp "${BINARY_PATH}" "artifacts/${ARTIFACT_NAME}"
+          ls -lh "artifacts/${ARTIFACT_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: srun-${{ matrix.target }}-${{ matrix.features }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2.5.0
+        with:
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
